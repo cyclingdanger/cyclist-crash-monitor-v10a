@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlparse, parse_qs
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
 import html
 import re
 import os
@@ -13,7 +12,7 @@ import urllib.error
 import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
-app.secret_key = "cyclist-monitor-local-v10"
+app.secret_key = "cyclist-monitor-local-v10.1"
 DB = "cyclist_crashes.db"
 
 US_STATES = [
@@ -350,19 +349,30 @@ def is_duplicate(a, b):
 
     ta = normalize(a["title"])
     tb = normalize(b["title"])
-    similarity = SequenceMatcher(None, ta, tb).ratio()
+    # Do not use difflib.SequenceMatcher here. News scans can return hundreds
+    # of headlines, and SequenceMatcher can become very expensive when many
+    # candidates are compared pairwise. Token overlap is fast and works well
+    # for syndicated/reworded crash headlines.
+    aa = title_tokens(a["title"])
+    bb = title_tokens(b["title"])
+    overlap = len(aa & bb) / max(1, min(len(aa), len(bb)))
 
     same_location = (
         a["location"] != "Unknown"
         and a["location"] == b["location"]
     )
-    aa = title_tokens(a["title"])
-    bb = title_tokens(b["title"])
-    overlap = len(aa & bb) / max(1, min(len(aa), len(bb)))
-
-    if similarity >= 0.74 and date_gap <= 2:
+    if ta == tb and date_gap <= 2:
         return True
-    if same_location and date_gap <= 2 and similarity >= 0.52 and overlap >= 0.55:
+    if date_gap <= 2 and overlap >= 0.75:
+        return True
+
+    # Same-state alone is not enough: Florida, for example, can have many
+    # unrelated crashes on the same day. For same-location reports, require
+    # several meaningful headline tokens in common. This consolidates
+    # independently reported versions of the same event without merging most
+    # unrelated statewide incidents.
+    shared = len(aa & bb)
+    if same_location and date_gap <= 2 and shared >= 3 and overlap >= 0.30:
         return True
     # Local outlets often publish the same crash on different publication
     # dates or with very different headlines. Strong title overlap plus the
@@ -573,7 +583,7 @@ def run_scan():
 @app.route("/health")
 def health():
     init_db()
-    return {"status": "ok", "version": "10.0"}
+    return {"status": "ok", "version": "10.1"}
 
 if __name__ == "__main__":
     init_db()
