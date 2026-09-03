@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>U.S. Cyclist Crash Monitor</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">NATIONAL CYCLIST SAFETY MONITOR · v10.0</div>
+  <h1>U.S. Cyclist Crash Monitor</h1>
+  <p class="sub">Fatal and serious-injury crashes involving cyclists and motor vehicles.</p>
+
+  {% with messages=get_flashed_messages() %}
+    {% if messages %}<div class="notice">{{ messages[-1] }}</div>{% endif %}
+  {% endwith %}
+
+  <form class="filters" method="get">
+    <div>
+      <label>Time period</label>
+      <select name="period">
+        <option value="1d" {{'selected' if period=='1d'}}>1 Day</option>
+        <option value="7d" {{'selected' if period=='7d'}}>7 Days</option>
+        <option value="30d" {{'selected' if period=='30d'}}>30 Days</option>
+        <option value="6m" {{'selected' if period=='6m'}}>6 Months</option>
+        <option value="1y" {{'selected' if period=='1y'}}>1 Year</option>
+      </select>
+    </div>
+    <div>
+      <label>Location</label>
+      <select name="location">
+        <option value="All Locations" {{'selected' if location=='All Locations'}}>All Locations</option>
+        <optgroup label="UNITED STATES — STATES">
+          {% for x in all_states %}
+            <option value="{{x}}" {{'selected' if location==x}}>{{x}}</option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="INTERNATIONAL">
+          {% for x in international_locations %}
+            <option value="{{x}}" {{'selected' if location==x}}>{{x}}</option>
+          {% endfor %}
+        </optgroup>
+      </select>
+    </div>
+    <button>Apply Filters</button>
+  </form>
+
+  <form method="post" action="/scan" class="scan">
+    <input type="hidden" name="period" value="{{period}}">
+    <input type="hidden" name="location" value="{{location}}">
+    <button>Scan for new reports</button>
+  </form>
+
+  <div class="cards">
+    <div class="card killed"><b>{{killed}}</b><span>Killed</span><small>{{period}}</small></div>
+    <div class="card injured"><b>{{injured}}</b><span>Seriously Injured</span><small>{{period}}</small></div>
+    <div class="card review"><b>{{review}}</b><span>Review Needed</span><small>{{period}}</small></div>
+    <div class="card"><b>{{total}}</b><span>Total</span><small>{{period}}</small></div>
+  </div>
+
+  {% macro incident_card(r) %}
+  <article class="incident">
+    <div class="tag {{r['status']|lower|replace(' ','-')}}">
+      {{r['status']}} · {{r['location'] if r['location']!='Unknown' else 'Location Unknown'}}
+    </div>
+    <h2>{{r['title']}}</h2>
+    <p class="desc">{{r['description']}}</p>
+    <div class="meta">
+      <span><b>ACCIDENT DATE</b>{{r['accident_date']}}</span>
+      <span><b>LOCATION</b>{{r['location']}}</span>
+      <span><b>SOURCE</b>{{r['source']}}</span>
+      <span><b>HIT-AND-RUN</b>{{r['hit_run']}}</span>
+    </div>
+    {% if r['url'] %}
+      <a href="{{r['url']}}" target="_blank" rel="noopener">Read original article ↗</a>
+    {% endif %}
+  </article>
+  {% endmacro %}
+
+  <section>
+    <h3>U.S. Incident Reports <small>{{us|length}}</small></h3>
+    {% if us %}
+      {% for r in us %}{{ incident_card(r) }}{% endfor %}
+    {% else %}
+      <div class="empty">No U.S. incidents found.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>International <small>{{intl|length}}</small></h3>
+    {% if intl %}
+      {% for r in intl %}{{ incident_card(r) }}{% endfor %}
+    {% else %}
+      <div class="empty">No international incidents found.</div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>Unknown / Review <small>{{unknown|length}}</small></h3>
+    {% if unknown %}
+      {% for r in unknown %}{{ incident_card(r) }}{% endfor %}
+    {% else %}
+      <div class="empty">No incidents requiring location review.</div>
+    {% endif %}
+  </section>
+
+  <footer>U.S. Cyclist Crash Monitor · Version 10.0 · Google News + Bing News · Relevant cyclist crash reports only; duplicate reports consolidated.</footer>
+</div>
+</body>
+</html>
