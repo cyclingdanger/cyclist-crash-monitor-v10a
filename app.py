@@ -1,408 +1,473 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
-from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus, urlparse, parse_qs
-from email.utils import parsedate_to_datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import html
-import re
-import os
 import sqlite3
+import re
+import html
+import unicodedata
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote_plus, urlparse
 import urllib.request
-import urllib.error
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
-app.secret_key = "cyclist-monitor-local-v10.1"
-DB = "cyclist_crashes.db"
+app.secret_key = "cyclist-monitor-local"
 
-US_STATES = [
-    "Alabama","Alaska","Arizona","Arkansas","California","Colorado",
-    "Connecticut","Delaware","Florida","Georgia","Hawaii","Idaho",
-    "Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine",
-    "Maryland","Massachusetts","Michigan","Minnesota","Mississippi",
-    "Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey",
-    "New Mexico","New York","North Carolina","North Dakota","Ohio",
-    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina",
-    "South Dakota","Tennessee","Texas","Utah","Vermont","Virginia",
-    "Washington","West Virginia","Wisconsin","Wyoming"
-]
+DB = str(Path(__file__).resolve().parent / "incidents.db")
 
-US_CITIES = {
-    "Miami":"Florida","Orlando":"Florida","Tampa":"Florida","Jacksonville":"Florida",
-    "Fort Lauderdale":"Florida","West Palm Beach":"Florida","Boca Raton":"Florida",
-    "Key Biscayne":"Florida","Virginia Key":"Florida","Gainesville":"Florida",
-    "Atlanta":"Georgia","Savannah":"Georgia","Austin":"Texas","Dallas":"Texas",
-    "Houston":"Texas","San Antonio":"Texas","Fort Worth":"Texas","Nashville":"Tennessee",
-    "Memphis":"Tennessee","Knoxville":"Tennessee","Chattanooga":"Tennessee",
-    "New York":"New York","Buffalo":"New York","Rochester":"New York","Albany":"New York",
-    "Los Angeles":"California","San Diego":"California","San Francisco":"California",
-    "Sacramento":"California","San Jose":"California","Chicago":"Illinois",
-    "Boston":"Massachusetts","Philadelphia":"Pennsylvania","Pittsburgh":"Pennsylvania",
-    "Seattle":"Washington","Portland":"Oregon","Denver":"Colorado","Phoenix":"Arizona",
-    "Las Vegas":"Nevada","Charlotte":"North Carolina","Raleigh":"North Carolina",
-    "Columbus":"Ohio","Cleveland":"Ohio","Detroit":"Michigan","Minneapolis":"Minnesota",
-    "St. Louis":"Missouri","Kansas City":"Missouri","Baltimore":"Maryland",
-    "Washington":"District of Columbia","Washington, D.C.":"District of Columbia",
+
+# ============================================================
+# U.S. LOCATIONS
+# ============================================================
+
+US_STATES = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
+    "California": "CA", "Colorado": "CO", "Connecticut": "CT",
+    "Delaware": "DE", "Florida": "FL", "Georgia": "GA", "Hawaii": "HI",
+    "Idaho": "ID", "Illinois": "IL", "Indiana": "IN", "Iowa": "IA",
+    "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME",
+    "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI",
+    "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO",
+    "Montana": "MT", "Nebraska": "NE", "Nevada": "NV",
+    "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM",
+    "New York": "NY", "North Carolina": "NC", "North Dakota": "ND",
+    "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pennsylvania": "PA", "Rhode Island": "RI",
+    "South Carolina": "SC", "South Dakota": "SD", "Tennessee": "TN",
+    "Texas": "TX", "Utah": "UT", "Vermont": "VT", "Virginia": "VA",
+    "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI",
+    "Wyoming": "WY", "District of Columbia": "DC",
 }
 
-INTERNATIONAL_LOCATIONS = [
-    "Canada","United Kingdom","Australia","New Zealand","Ireland","France",
-    "Germany","Spain","Italy","Netherlands","Mexico"
-]
+US_CITIES = {
+    "Jacksonville": "Florida", "Miami": "Florida", "Orlando": "Florida",
+    "Tampa": "Florida", "Fort Lauderdale": "Florida",
+    "West Palm Beach": "Florida", "Palm Beach": "Florida",
+    "Boston": "Massachusetts", "Springfield": "Massachusetts",
+    "Worcester": "Massachusetts", "New York City": "New York",
+    "Buffalo": "New York", "Rochester": "New York",
+    "Charlotte": "North Carolina", "Raleigh": "North Carolina",
+    "Wilmington": "North Carolina", "Los Angeles": "California",
+    "San Diego": "California", "San Francisco": "California",
+    "Sacramento": "California", "Chicago": "Illinois",
+    "Philadelphia": "Pennsylvania", "Pittsburgh": "Pennsylvania",
+    "Denver": "Colorado", "Phoenix": "Arizona", "Seattle": "Washington",
+    "Portland": "Oregon", "Dallas": "Texas", "Houston": "Texas",
+    "Austin": "Texas", "Atlanta": "Georgia", "Nashville": "Tennessee",
+    "Memphis": "Tennessee", "Knoxville": "Tennessee",
+    "Chattanooga": "Tennessee", "Murfreesboro": "Tennessee",
+    "Clarksville": "Tennessee", "Columbus": "Ohio",
+    "Cleveland": "Ohio", "Detroit": "Michigan",
+    "Minneapolis": "Minnesota", "St. Louis": "Missouri",
+    "Kansas City": "Missouri", "Las Vegas": "Nevada",
+    "New Orleans": "Louisiana", "Baton Rouge": "Louisiana",
+    "Chattanooga": "Tennessee", "Johnson City": "Tennessee",
+    "Kingsport": "Tennessee", "Franklin": "Tennessee",
+    "Macon": "Georgia", "Savannah": "Georgia", "Austin": "Texas",
+}
 
-CYCLIST_TERMS = [
-    r"\bcyclist\b", r"\bcyclists\b", r"\bbicyclist\b", r"\bbicyclists\b",
-    r"\bbicycle rider\b", r"\bbike rider\b", r"\bcyclist rider\b",
-    r"\bperson riding a bicycle\b", r"\bman riding a bicycle\b",
-    r"\bwoman riding a bicycle\b", r"\bteen riding a bicycle\b",
-    r"\bcycling\b"
-]
 
-CRASH_TERMS = [
-    r"\bcrash\b", r"\bcollision\b", r"\baccident\b", r"\bstruck\b",
-    r"\bhit by\b", r"\bstruck by\b", r"\brun over\b", r"\bvehicle\b",
-    r"\bmotorist\b", r"\bdriver\b", r"\bcar\b", r"\btruck\b",
-    r"\bsuv\b", r"\bvan\b", r"\bbus\b", r"\bautomobile\b",
-    r"\bpickup\b", r"\btraffic\b"
-]
+# ============================================================
+# INTERNATIONAL LOCATIONS
+# ============================================================
 
-FATAL_TERMS = [
-    r"\bkilled\b", r"\bdead\b", r"\bdied\b", r"\bdies\b", r"\bfatal\b",
-    r"\bfatality\b", r"\bdeath\b", r"\bpronounced dead\b"
-]
+INTL_COUNTRIES = {
+    "United Kingdom", "UK", "England", "Scotland", "Wales",
+    "Northern Ireland", "Ireland", "Republic of Ireland", "Canada",
+    "Australia", "New Zealand", "France", "Spain", "Germany", "Italy",
+    "Netherlands", "Belgium", "Denmark", "Sweden", "Norway", "Finland",
+    "Portugal", "Mexico", "Brazil", "South Africa", "India", "Japan",
+    "China",
+}
 
-SERIOUS_TERMS = [
-    r"\bseriously injured\b", r"\bserious injur", r"\bcritical condition\b",
-    r"\bcritically injured\b", r"\bcritically hurt\b", r"\bcritical injur",
-    r"\blife[- ]threatening\b", r"\bhospitalized\b", r"\bhospitalised\b",
-    r"\bsevere injur", r"\bmajor injur", r"\bspinal injur", r"\bspinal cord\b",
-    r"\bpossible paralysis\b", r"\bparaly[sz]ed\b", r"\bmultiple injur",
-    r"\bmultiple fractures?\b", r"\btraumatic injur", r"\bserious trauma\b",
-    r"\bfighting for (?:his|her|their) life\b", r"\bICU\b", r"\btrauma center\b",
-    r"\btrauma centre\b", r"\bbrain injur", r"\bhead injur", r"\binternal injur"
-]
+INTL_CITIES = {
+    "Dublin": "Ireland", "Cork": "Ireland", "Galway": "Ireland",
+    "Meath": "Ireland", "London": "United Kingdom",
+    "Manchester": "United Kingdom", "Birmingham": "United Kingdom",
+    "Liverpool": "United Kingdom", "Bristol": "United Kingdom",
+    "Leeds": "United Kingdom", "Glasgow": "United Kingdom",
+    "Edinburgh": "United Kingdom", "Cardiff": "United Kingdom",
+    "Belfast": "United Kingdom", "Northampton": "United Kingdom",
+    "Wiltshire": "United Kingdom", "Yorkshire": "United Kingdom",
+    "Kent": "United Kingdom", "Essex": "United Kingdom",
+    "Surrey": "United Kingdom", "Hampshire": "United Kingdom",
+    "Devon": "United Kingdom", "Southampton": "United Kingdom",
+    "Toronto": "Canada", "Vancouver": "Canada", "Montreal": "Canada",
+    "Calgary": "Canada", "Paris": "France", "Madrid": "Spain",
+    "Barcelona": "Spain", "Berlin": "Germany", "Rome": "Italy",
+    "Amsterdam": "Netherlands", "Auckland": "New Zealand",
+    "Sydney": "Australia", "Melbourne": "Australia",
+}
 
-EXCLUDE_TERMS = [
-    r"\bfootball\b", r"\bbasketball\b", r"\bbaseball\b", r"\bsoccer\b",
-    r"\bcelebrity\b", r"\bsinger\b", r"\bactor\b", r"\bactress\b",
-    r"\bpolitician\b", r"\belection\b", r"\bshooting\b", r"\bhurricane\b",
-    r"\btornado\b", r"\bvideo game\b"
-]
 
-SEARCH_QUERIES = [
-    '"cyclist killed" crash',
-    '"bicyclist killed" crash',
-    '"cyclist killed" collision',
-    '"bicyclist killed" collision',
-    '"cyclist injured" crash',
-    '"bicyclist injured" crash',
-    '"cyclist hurt" crash',
-    '"bicyclist hurt" crash',
-    '"cyclist" "serious injury" crash',
-    '"cyclist" "seriously injured" crash',
-    '"cyclist" "critical condition" crash',
-    '"cyclist" "critically hurt" crash',
-    '"cyclist" hospitalized crash',
-    '"cyclist" "spinal injury" crash',
-    '"cyclist" "spinal cord injury" crash',
-    '"cyclist" "traumatic injury" crash',
-    '"cyclist" "possible paralysis" crash',
-    '"cyclist" "multiple injuries" crash',
-    '"cyclist" "fighting for his life" crash',
-    '"cyclist" "fighting for her life" crash',
-    '"bicyclist" hospitalized crash',
-    '"bicyclist" "spinal cord injury" crash',
-    '"cyclist" struck by driver',
-    '"cyclist" struck by vehicle',
-    '"cyclist" struck by car',
-    '"bicyclist" struck by driver',
-    '"bicyclist" struck by vehicle',
-    '"bicyclist" struck by car',
-    '"cyclist" Miami crash',
-    '"bicyclist" Miami crash',
-    '"cyclist" Florida injury crash',
-    '"cyclist" Rickenbacker Causeway',
-    '"bicyclist" Rickenbacker Causeway',
-    '"cyclist" Virginia Key crash',
-    '"bicyclist" Virginia Key crash',
-    'site:local10.com cyclist Miami',
-    'site:local10.com Rickenbacker cyclist',
-    'site:nbcmiami.com cyclist Miami',
-    'site:nbcmiami.com Rickenbacker cyclist',
-]
-
-# Two independently queried news indexes.
-# Bing News RSS is documented as supporting /news/search?...&format=RSS.
-# Google News supports /rss/search?q=... .
-SOURCES = ("Google News", "Bing News")
+# ============================================================
+# HELPERS
+# ============================================================
 
 def clean(value):
     value = html.unescape(value or "")
     value = re.sub(r"<[^>]+>", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
 
 def normalize(value):
-    value = clean(value).lower()
+    value = unicodedata.normalize("NFKD", value or "")
+    value = value.encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9 ]", " ", value)
 
-def domain(url):
+
+def contains(text, phrase):
+    return bool(re.search(r"\b" + re.escape(phrase.lower()) + r"\b",
+                          text.lower()))
+
+
+def domain_from_url(url):
     try:
         return urlparse(url).netloc.lower().replace("www.", "")
     except Exception:
         return ""
 
-def contains(text, phrase):
-    return bool(re.search(r"\b" + re.escape(phrase.lower()) + r"\b", (text or "").lower()))
 
-def parse_feed_date(value):
+# ============================================================
+# LOCATION DETECTION
+# ============================================================
+
+def location_from_text(title, description, source="", url=""):
+    """
+    Returns:
+        location, country, kind
+
+    U.S. incidents:
+        location = state name
+        country = United States
+        kind = us
+
+    International incidents:
+        location = country name
+        country = country name
+        kind = international
+
+    Unknown:
+        Unknown, Unknown, unknown
+
+    IMPORTANT:
+    International city/country evidence is checked before U.S. evidence.
+    This prevents a word such as Massachusetts appearing in an unrelated
+    U.K. story from automatically making the story a Massachusetts story.
+    """
+
+    title = clean(title)
+    description = clean(description)
+    source = clean(source)
+
+    title_lower = title.lower()
+    body_lower = description.lower()
+    source_lower = source.lower()
+    domain = domain_from_url(url)
+
+    # --------------------------------------------------------
+    # 1. Very strong international signals in the headline
+    # --------------------------------------------------------
+
+    intl_scores = {}
+
+    for city, country in INTL_CITIES.items():
+        if contains(title, city):
+            intl_scores[country] = intl_scores.get(country, 0) + 50
+
+    for country_name in INTL_COUNTRIES:
+        if contains(title, country_name):
+            intl_scores[country_name] = intl_scores.get(country_name, 0) + 50
+
+    # UK source/domain is strong evidence.
+    uk_domains = (
+        ".co.uk", ".uk", "bbc.", "independent.co.uk",
+        "theguardian.com", "yorkshirepost.co.uk",
+        "northamptonchron.co.uk"
+    )
+    if domain.endswith(".co.uk") or domain.endswith(".uk") or any(
+        token in domain for token in uk_domains if "." in token
+    ):
+        intl_scores["United Kingdom"] = intl_scores.get(
+            "United Kingdom", 0
+        ) + 40
+
+    # --------------------------------------------------------
+    # 2. Strong U.S. headline evidence
+    # --------------------------------------------------------
+
+    state_scores = {state: 0 for state in US_STATES}
+
+    for state in US_STATES:
+        if contains(title, state):
+            state_scores[state] += 40
+
+    for city, state in US_CITIES.items():
+        if contains(title, city):
+            state_scores[state] += 45
+
+    # International wins if it has stronger evidence.
+    best_intl = max(intl_scores, key=intl_scores.get) if intl_scores else None
+    best_intl_score = intl_scores.get(best_intl, 0) if best_intl else 0
+
+    best_state = max(state_scores, key=state_scores.get)
+    best_state_score = state_scores[best_state]
+
+    if best_intl_score > 0 and best_intl_score >= best_state_score:
+        return best_intl, best_intl, "international"
+
+    if best_state_score > 0:
+        return best_state, "United States", "us"
+
+    # --------------------------------------------------------
+    # 3. Description/body evidence
+    # --------------------------------------------------------
+
+    intl_scores = {}
+
+    for city, country in INTL_CITIES.items():
+        if contains(description, city):
+            intl_scores[country] = intl_scores.get(country, 0) + 15
+
+    for country_name in INTL_COUNTRIES:
+        if contains(description, country_name):
+            intl_scores[country_name] = intl_scores.get(country_name, 0) + 15
+
+    if domain.endswith(".co.uk") or domain.endswith(".uk"):
+        intl_scores["United Kingdom"] = intl_scores.get(
+            "United Kingdom", 0
+        ) + 30
+
+    best_intl = max(intl_scores, key=intl_scores.get) if intl_scores else None
+    if best_intl:
+        return best_intl, best_intl, "international"
+
+    for state in US_STATES:
+        if contains(description, state):
+            return state, "United States", "us"
+
+    for city, state in US_CITIES.items():
+        if contains(description, city):
+            return state, "United States", "us"
+
+    # --------------------------------------------------------
+    # 4. Source name can help when title/body are sparse
+    # --------------------------------------------------------
+
+    for city, country in INTL_CITIES.items():
+        if contains(source, city):
+            return country, country, "international"
+
+    for state in US_STATES:
+        if contains(source, state):
+            return state, "United States", "us"
+
+    return "Unknown", "Unknown", "unknown"
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+def status_from_text(text):
+    text = clean(text).lower()
+
+    killed_words = [
+        "killed", "dead", "died", "dies", "fatal", "death",
+        "struck and killed", "cyclist dies", "bicyclist dies",
+        "fatal crash", "fatal collision", "pronounced dead",
+    ]
+
+    injured_words = [
+        "seriously injured", "serious injuries", "critical condition",
+        "life-threatening", "critically injured", "hospitalized",
+        "severe injuries", "major injuries", "serious injury",
+        "life threatening",
+    ]
+
+    if any(word in text for word in killed_words):
+        return "Killed"
+
+    if any(word in text for word in injured_words):
+        return "Seriously Injured"
+
+    return "Review Needed"
+
+
+# ============================================================
+# DATE PARSING
+# ============================================================
+
+def parse_rss_date(value):
     value = clean(value)
-    if not value:
-        return None
-    try:
-        dt = parsedate_to_datetime(value)
-        if dt.tzinfo:
-            dt = dt.astimezone(timezone.utc)
-        return dt.date().isoformat()
-    except Exception:
-        pass
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z"):
+    formats = (
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%a, %d %b %Y %H:%M:%S",
+        "%Y-%m-%d",
+    )
+
+    for fmt in formats:
         try:
-            return datetime.strptime(value, fmt).date().isoformat()
-        except Exception:
-            pass
+            dt = datetime.strptime(value, fmt)
+            if dt.tzinfo:
+                dt = dt.astimezone(timezone.utc)
+            return dt.date().isoformat()
+        except ValueError:
+            continue
+
     return None
 
-def parse_accident_date(title, description, published):
-    text = clean(f"{title} {description}")
+
+def parse_date(text, fallback=None):
+    text = clean(text)
+
     patterns = [
-        r"(?:on|occurred|happened|crash(?:ed)?|collision|accident)\s+"
+        r"(?:on|occurred|happened|crash|collision|accident)\s+"
         r"([A-Z][a-z]+\s+\d{1,2},\s+\d{4})",
         r"([A-Z][a-z]+\s+\d{1,2},\s+\d{4})",
-        r"(\d{4}-\d{2}-\d{2})"
+        r"(\d{4}-\d{2}-\d{2})",
     ]
+
     for pattern in patterns:
-        m = re.search(pattern, text)
-        if not m:
+        match = re.search(pattern, text)
+        if not match:
             continue
-        raw = m.group(1)
+
+        raw = match.group(1)
+
         for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
             try:
                 return datetime.strptime(raw, fmt).date().isoformat()
             except ValueError:
                 pass
-    return published
 
-def status_from_text(text):
-    t = clean(text).lower()
-    if any(re.search(p, t) for p in FATAL_TERMS):
-        return "Killed"
-    if any(re.search(p, t) for p in SERIOUS_TERMS):
-        return "Seriously Injured"
-    return "Review Needed"
+    return fallback
 
-def is_relevant_cyclist_report(title, description):
-    text = clean(f"{title} {description}").lower()
-    cycling = any(re.search(p, text) for p in CYCLIST_TERMS)
-    crash = any(re.search(p, text) for p in CRASH_TERMS)
-    outcome = any(re.search(p, text) for p in FATAL_TERMS + SERIOUS_TERMS)
-    if not (cycling and crash and outcome):
-        return False
 
-    # Require the cyclist and crash/vehicle concepts to be reasonably close.
-    relationship = [
-        r"(cyclist|bicyclist|bicycle rider|bike rider|cycling).{0,220}"
-        r"(crash|collision|struck|hit|vehicle|driver|car|truck|suv|van)",
-        r"(crash|collision|struck|hit|vehicle|driver|car|truck|suv|van).{0,220}"
-        r"(cyclist|bicyclist|bicycle rider|bike rider|cycling)"
-    ]
-    if not any(re.search(p, text, re.I) for p in relationship):
-        return False
-
-    # Exclude obvious unrelated uses.
-    if sum(bool(re.search(p, text)) for p in EXCLUDE_TERMS) >= 2:
-        return False
-    return True
-
-def location_from_text(title, description, source="", url=""):
-    title = clean(title)
-    description = clean(description)
-    source = clean(source)
-
-    # Strong city/state evidence in headline first.
-    for state in US_STATES:
-        if contains(title, state):
-            return state, "United States"
-    for city, state in US_CITIES.items():
-        if contains(title, city):
-            return state, "United States"
-
-    # Common "in/near/at CITY" patterns, even when CITY is not in our list.
-    text = f"{title} {description}"
-    for pattern in [
-        r"\b(?:in|near|at|outside)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,3})",
-    ]:
-        for m in re.finditer(pattern, text):
-            candidate = m.group(1).strip(" ,.;:()")
-            # Don't mistake generic nouns for places.
-            if candidate.lower() in {"the", "a", "an", "least", "about"}:
-                continue
-            for city, state in US_CITIES.items():
-                if candidate.lower() == city.lower():
-                    return state, "United States"
-
-    for state in US_STATES:
-        if contains(description, state):
-            return state, "United States"
-    for city, state in US_CITIES.items():
-        if contains(description, city):
-            return state, "United States"
-
-    # Source/domain can provide strong local evidence.
-    d = domain(url)
-    if "local10.com" in d or "nbcmiami.com" in d:
-        if any(x in text.lower() for x in ["miami", "rickenbacker", "virginia key", "key biscayne"]):
-            return "Florida", "United States"
-
-    # International.
-    for place in INTERNATIONAL_LOCATIONS:
-        if contains(title, place) or contains(description, place):
-            return place, place
-
-    if d.endswith(".co.uk") or d.endswith(".uk"):
-        return "United Kingdom", "United Kingdom"
-
-    return "Unknown", "Unknown"
-
-def parse_rss(xml_bytes, default_source):
-    root = ET.fromstring(xml_bytes)
-    out = []
-    for item in root.findall(".//item"):
-        title = clean(item.findtext("title"))
-        desc = clean(item.findtext("description"))
-        link = clean(item.findtext("link"))
-        pub = parse_feed_date(item.findtext("pubDate"))
-        source = clean(item.findtext("source")) or default_source
-        if title and link:
-            out.append((title, desc, link, pub or datetime.now().date().isoformat(), source))
-    return out
-
-def fetch_google_news(query, days=365):
-    cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
-    url = (
-        "https://news.google.com/rss/search?q="
-        + quote_plus(query + " after:" + cutoff)
-        + "&hl=en-US&gl=US&ceid=US:en"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return parse_rss(r.read(), "Google News")
-
-def fetch_bing_news(query, days=365):
-    # Bing News RSS supports format=RSS.  The qft interval is a broad
-    # freshness hint; final date filtering is done by the application.
-    url = (
-        "https://www.bing.com/news/search?q="
-        + quote_plus(query)
-        + "&setmkt=en-US&format=RSS"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        items = parse_rss(r.read(), "Bing News")
-    cutoff = datetime.now().date() - timedelta(days=days)
-    return [x for x in items if x[3] >= cutoff.isoformat()]
-
-def unwrap_bing_url(url):
-    if "bing.com/news/apiclick.aspx" not in url:
-        return url
-    try:
-        q = parse_qs(urlparse(url).query)
-        return q.get("url", [url])[0]
-    except Exception:
-        return url
-
-def fetch_one(source, query):
-    try:
-        if source == "Google News":
-            return fetch_google_news(query)
-        return fetch_bing_news(query)
-    except Exception:
-        return []
-
-def title_tokens(title):
-    stop = {
-        "a","an","and","after","at","by","for","from","in","near","of","on","the",
-        "to","with","road","street","avenue","cyclist","cyclists","bicyclist",
-        "bicyclists","bike","biker","killed","injured","crash","collision",
-        "accident","fatal","seriously","serious","dead","dies","death"
-    }
-    return {w for w in normalize(title).split() if w not in stop and len(w) > 2}
-
-def is_duplicate(a, b):
-    if a["country"] != b["country"]:
-        return False
-    try:
-        da = datetime.fromisoformat(a["accident_date"]).date()
-        db = datetime.fromisoformat(b["accident_date"]).date()
-        date_gap = abs((da - db).days)
-    except Exception:
-        date_gap = 999
-
-    ta = normalize(a["title"])
-    tb = normalize(b["title"])
-    # Do not use difflib.SequenceMatcher here. News scans can return hundreds
-    # of headlines, and SequenceMatcher can become very expensive when many
-    # candidates are compared pairwise. Token overlap is fast and works well
-    # for syndicated/reworded crash headlines.
-    aa = title_tokens(a["title"])
-    bb = title_tokens(b["title"])
-    overlap = len(aa & bb) / max(1, min(len(aa), len(bb)))
-
-    same_location = (
-        a["location"] != "Unknown"
-        and a["location"] == b["location"]
-    )
-    if ta == tb and date_gap <= 2:
-        return True
-    if date_gap <= 2 and overlap >= 0.75:
-        return True
-
-    # Same-state alone is not enough: Florida, for example, can have many
-    # unrelated crashes on the same day. For same-location reports, require
-    # several meaningful headline tokens in common. This consolidates
-    # independently reported versions of the same event without merging most
-    # unrelated statewide incidents.
-    shared = len(aa & bb)
-    if same_location and date_gap <= 2 and shared >= 3 and overlap >= 0.30:
-        return True
-    # Local outlets often publish the same crash on different publication
-    # dates or with very different headlines. Strong title overlap plus the
-    # same location is enough to consolidate them.
-    if same_location and overlap >= 0.80:
-        return True
-    return False
-
-def fingerprint(item):
-    tokens = sorted(title_tokens(item["title"]))
-    return f'{item["accident_date"]}|{normalize(item["location"])}|{" ".join(tokens[:35])}'
+# ============================================================
+# DESCRIPTION
+# ============================================================
 
 def make_description(title, description):
-    d = clean(description)
-    d = re.sub(r"https?://\S+", "", d).strip()
-    if not d or d.lower() == clean(title).lower():
-        return "News report about a cyclist crash or collision. Open the original article for additional details."
-    return d[:700]
+    """
+    Google News often gives us an RSS description containing HTML,
+    the headline again, and the publisher. Never use the URL itself
+    as the displayed description.
+    """
+
+    title = clean(title)
+    description = clean(description)
+
+    # Remove a leading publisher/source prefix.
+    description = re.sub(
+        r"^\s*(?:[A-Za-z0-9&.'’ -]{1,100})\s*:\s*",
+        "",
+        description
+    ).strip()
+
+    # Remove an exact repeated headline.
+    if description.lower().startswith(title.lower()):
+        description = description[len(title):].strip(" -:|")
+
+    # Remove obvious URL-only text.
+    description = re.sub(r"https?://\S+", "", description).strip()
+
+    if not description or description.lower() == title.lower():
+        return (
+            "News report about a cyclist crash or collision. "
+            "Open the original article for additional details."
+        )
+
+    return description[:700]
+
+
+# ============================================================
+# DUPLICATE DETECTION
+# ============================================================
+
+STOP_WORDS = {
+    "a", "an", "and", "after", "at", "by", "for", "from", "in", "near",
+    "of", "on", "the", "to", "with", "road", "street", "avenue",
+    "cyclist", "cyclists", "bicyclist", "bicyclists", "bike", "biker",
+    "killed", "injured", "crash", "collision", "accident", "fatal",
+    "seriously", "serious", "dead", "dies", "death",
+}
+
+
+def title_tokens(title):
+    return {
+        word for word in normalize(title).split()
+        if word not in STOP_WORDS and len(word) > 2
+    }
+
+
+def fingerprint(title, location, accident_date):
+    tokens = sorted(title_tokens(title))
+    core = " ".join(tokens[:35])
+
+    return f"{accident_date}|{normalize(location)}|{core}"
+
+
+def is_duplicate(existing, new):
+    if existing["accident_date"] != new["accident_date"]:
+        return False
+
+    if existing["country"] != new["country"]:
+        return False
+
+    # Unknown location is deliberately not enough to merge stories.
+    # We require strong title similarity when location is unknown.
+    title_a = normalize(existing["title"])
+    title_b = normalize(new["title"])
+
+    tokens_a = title_tokens(existing["title"])
+    tokens_b = title_tokens(new["title"])
+
+    shared = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    similarity = shared / max(1, union)
+    overlap = shared / max(
+        1, min(len(tokens_a), len(tokens_b))
+    )
+
+    same_location = (
+        normalize(existing["location"])
+        == normalize(new["location"])
+        and existing["location"] != "Unknown"
+    )
+
+    # Same event with nearly identical wording.
+    if similarity >= 0.74:
+        return True
+
+    # Different publishers often rewrite the same event substantially.
+    if same_location and similarity >= 0.52 and overlap >= 0.55:
+        return True
+
+    # Strong token overlap even if one headline adds/removes words.
+    if same_location and overlap >= 0.72:
+        return True
+
+    return False
+
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 def init_db():
     con = sqlite3.connect(DB)
     con.execute("""
         CREATE TABLE IF NOT EXISTS incidents (
             id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL,
-            title TEXT NOT NULL,
+            status TEXT,
+            title TEXT,
             description TEXT,
             location TEXT,
             country TEXT,
-            accident_date TEXT NOT NULL,
+            accident_date TEXT,
             source TEXT,
             url TEXT,
             hit_run TEXT,
@@ -412,180 +477,489 @@ def init_db():
     """)
     con.commit()
     con.close()
+    migrate_and_dedupe_db()
 
-def seed_verified_regression_case():
-    # This is a real, verified recent report.  It is included so a clean
-    # installation immediately contains the known Miami test case while
-    # the live scanner independently searches for it as well.
-    item = {
-        "status": "Seriously Injured",
-        "title": "Orthopedic surgeon suffers spinal injury after driver struck him while cycling on Rickenbacker Causeway in Miami",
-        "description": (
-            "Dr. Gilbert Beauperthuy-Rojas remained hospitalized after a driver struck him "
-            "while he was cycling in Miami's Virginia Key. The collision occurred Saturday "
-            "morning on the Rickenbacker Causeway. A family member reported a spinal cord "
-            "injury and other serious injuries."
-        ),
-        "location": "Florida",
-        "country": "United States",
-        "accident_date": "2026-08-29",
-        "source": "WPLG Local 10",
-        "url": "https://www.local10.com/traffic/2026/08/31/orthopedic-surgeon-suffers-spinal-injury-after-driver-struck-him-while-cycling-in-miamis-virginia-key/",
-        "hit_run": "Unknown",
-    }
+
+def migrate_and_dedupe_db():
+    """
+    Repair old records once at startup and remove duplicate incidents.
+    This is NOT called on every page request, which keeps filtering fast.
+    """
+
     con = sqlite3.connect(DB)
-    con.execute("""
-        INSERT OR IGNORE INTO incidents
-        (status,title,description,location,country,accident_date,source,url,hit_run,created_at,fingerprint)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        item["status"], item["title"], item["description"], item["location"],
-        item["country"], item["accident_date"], item["source"], item["url"],
-        item["hit_run"], datetime.now().isoformat(), fingerprint(item)
-    ))
+    con.row_factory = sqlite3.Row
+
+    rows = con.execute(
+        "SELECT * FROM incidents ORDER BY id"
+    ).fetchall()
+
+    # Reclassify all existing records.
+    for row in rows:
+        location, country, _ = location_from_text(
+            row["title"],
+            row["description"],
+            row["source"],
+            row["url"],
+        )
+
+        description = make_description(
+            row["title"],
+            row["description"],
+        )
+
+        con.execute(
+            """
+            UPDATE incidents
+            SET location = ?, country = ?, description = ?
+            WHERE id = ?
+            """,
+            (location, country, description, row["id"]),
+        )
+
+    con.commit()
+
+    rows = con.execute(
+        "SELECT * FROM incidents ORDER BY id"
+    ).fetchall()
+
+    kept = []
+    delete_ids = set()
+
+    for row in rows:
+        current = dict(row)
+
+        duplicate_row = None
+
+        for existing in kept:
+            if is_duplicate(existing, current):
+                duplicate_row = existing
+                break
+
+        if duplicate_row is None:
+            kept.append(current)
+            continue
+
+        # Keep the record with the fuller description.
+        if len(current["description"] or "") > len(
+            duplicate_row["description"] or ""
+        ):
+            con.execute(
+                """
+                UPDATE incidents
+                SET description = ?, source = ?, url = ?
+                WHERE id = ?
+                """,
+                (
+                    current["description"],
+                    current["source"],
+                    current["url"],
+                    duplicate_row["id"],
+                ),
+            )
+
+        delete_ids.add(current["id"])
+
+    for incident_id in delete_ids:
+        con.execute(
+            "DELETE FROM incidents WHERE id = ?",
+            (incident_id,),
+        )
+
     con.commit()
     con.close()
 
+
+# ============================================================
+# GOOGLE NEWS
+# ============================================================
+
+def fetch_google_news(query, days=365):
+    cutoff = (
+        datetime.now() - timedelta(days=days)
+    ).strftime("%Y-%m-%d")
+
+    search_url = (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(query + " after:" + cutoff)
+        + "&hl=en-US&gl=US&ceid=US:en"
+    )
+
+    req = urllib.request.Request(
+        search_url,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+
+    with urllib.request.urlopen(req, timeout=5) as response:
+        data = response.read()
+
+    root = ET.fromstring(data)
+    results = []
+
+    for item in root.findall(".//item"):
+        title = clean(item.findtext("title"))
+        description = clean(item.findtext("description"))
+        link = clean(item.findtext("link"))
+        pub_date = clean(item.findtext("pubDate"))
+        source = clean(item.findtext("source")) or "Google News"
+
+        published = parse_rss_date(pub_date)
+
+        if not published:
+            published = datetime.now().date().isoformat()
+
+        results.append(
+            (
+                title,
+                description,
+                link,
+                published,
+                source,
+            )
+        )
+
+    return results
+
+
+# ============================================================
+# SCAN
+# ============================================================
+
 def scan():
+    # Keep the search list focused. Broad searches are supplemented
+    # by state-specific searches for the states most likely to produce
+    # local reports.
+    queries = [
+        '"cyclist killed" crash',
+        '"cyclist killed" collision',
+        '"bicyclist killed" crash',
+        '"bicyclist killed" collision',
+        '"cyclist seriously injured" crash',
+        '"cyclist seriously injured" collision',
+        '"bicyclist seriously injured" crash',
+        '"cyclist" "critical condition" crash',
+        '"cyclist" "serious injuries" crash',
+        '"bicyclist" "fatal crash"',
+        '"bicyclist" "fatal collision"',
+        '"cyclist killed" Tennessee',
+        '"bicyclist killed" Tennessee',
+        '"cyclist seriously injured" Tennessee',
+        '"cyclist killed" Florida',
+        '"cyclist killed" Texas',
+        '"cyclist killed" California',
+        '"cyclist killed" New York',
+        '"cyclist killed" United Kingdom',
+        '"cyclist killed" UK',
+        '"cyclist killed" Canada',
+    ]
+
     candidates = []
-    jobs = [(source, query) for source in SOURCES for query in SEARCH_QUERIES]
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        futures = [ex.submit(fetch_one, source, query) for source, query in jobs]
-        for f in as_completed(futures):
+    # Parallel requests make scanning much less likely to appear frozen.
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = {
+            executor.submit(fetch_google_news, query, 365): query
+            for query in queries
+        }
+
+        for future in as_completed(futures):
             try:
-                candidates.extend(f.result())
+                candidates.extend(future.result())
             except Exception:
-                pass
+                continue
 
+    # Exact RSS duplicates first.
     seen = set()
     parsed = []
-    for title, desc, url, published, source in candidates:
-        url = unwrap_bing_url(url)
-        key = (normalize(title), url)
-        if key in seen:
-            continue
-        seen.add(key)
 
-        if not is_relevant_cyclist_report(title, desc):
+    for (
+        title,
+        description,
+        url,
+        publication_date,
+        source,
+    ) in candidates:
+
+        exact_key = (
+            normalize(title),
+            normalize(url),
+        )
+
+        if exact_key in seen:
             continue
 
-        loc, country = location_from_text(title, desc, source, url)
-        combined = f"{title} {desc}"
+        seen.add(exact_key)
+
+        combined = f"{title} {description}"
+
+        location, country, _ = location_from_text(
+            title,
+            description,
+            source,
+            url,
+        )
+
+        status = status_from_text(combined)
+
+        # Prefer an actual date found in the article text.
+        accident_date = parse_date(
+            combined,
+            publication_date,
+        )
+
         parsed.append({
-            "status": status_from_text(combined),
+            "status": status,
             "title": title,
-            "description": make_description(title, desc),
-            "location": loc,
+            "description": make_description(
+                title,
+                description,
+            ),
+            "location": location,
             "country": country,
-            "accident_date": parse_accident_date(title, desc, published),
+            "accident_date": accident_date,
             "source": source,
             "url": url,
             "hit_run": "Unknown",
         })
 
+    # Cross-publisher duplicate removal.
     unique = []
-    for item in parsed:
-        dup = False
-        for old in unique:
-            if is_duplicate(old, item):
-                dup = True
-                # Keep the fuller report.
-                if len(item["description"]) > len(old["description"]):
-                    old["description"] = item["description"]
-                    old["source"] = item["source"]
-                    old["url"] = item["url"]
+
+    for incident in parsed:
+        duplicate_index = None
+
+        for index, existing in enumerate(unique):
+            if is_duplicate(existing, incident):
+                duplicate_index = index
                 break
-        if not dup:
-            unique.append(item)
+
+        if duplicate_index is None:
+            unique.append(incident)
+        else:
+            existing = unique[duplicate_index]
+
+            if len(incident["description"]) > len(
+                existing["description"]
+            ):
+                existing["description"] = incident["description"]
+                existing["source"] = incident["source"]
+                existing["url"] = incident["url"]
 
     con = sqlite3.connect(DB)
     added = 0
-    for item in unique:
-        fp = fingerprint(item)
+
+    for incident in unique:
+        fp = fingerprint(
+            incident["title"],
+            incident["location"],
+            incident["accident_date"],
+        )
+
         try:
-            con.execute("""
-                INSERT INTO incidents
-                (status,title,description,location,country,accident_date,source,url,hit_run,created_at,fingerprint)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                item["status"], item["title"], item["description"], item["location"],
-                item["country"], item["accident_date"], item["source"], item["url"],
-                item["hit_run"], datetime.now().isoformat(), fp
-            ))
+            con.execute(
+                """
+                INSERT INTO incidents (
+                    status, title, description, location, country,
+                    accident_date, source, url, hit_run,
+                    created_at, fingerprint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident["status"],
+                    incident["title"],
+                    incident["description"],
+                    incident["location"],
+                    incident["country"],
+                    incident["accident_date"],
+                    incident["source"],
+                    incident["url"],
+                    incident["hit_run"],
+                    datetime.now().isoformat(),
+                    fp,
+                ),
+            )
             added += 1
         except sqlite3.IntegrityError:
+            # Existing fingerprint = already stored.
             pass
+
     con.commit()
     con.close()
-    return len(candidates), len(parsed), added
 
-def period_days(period):
-    return {"1d":1, "7d":7, "30d":30, "6m":183, "1y":365}.get(period, 1)
+    # Clean up duplicates created by older versions after the scan.
+    migrate_and_dedupe_db()
+
+    return len(candidates), added
+
+
+# ============================================================
+# GET INCIDENTS
+# ============================================================
 
 def get_incidents(period, location):
-    days = period_days(period)
+    period_days = {
+        "1d": 1,
+        "7d": 7,
+        "30d": 30,
+        "6m": 183,
+        "1y": 365,
+    }
+
+    days = period_days.get(period, 1)
     today = datetime.now().date()
     cutoff = today - timedelta(days=days - 1)
+
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
-    rows = con.execute("""
-        SELECT * FROM incidents
-        WHERE accident_date >= ? AND accident_date <= ?
+
+    rows = con.execute(
+        """
+        SELECT *
+        FROM incidents
+        WHERE accident_date >= ?
+          AND accident_date <= ?
         ORDER BY accident_date DESC, id DESC
-    """, (cutoff.isoformat(), today.isoformat())).fetchall()
+        """,
+        (
+            cutoff.isoformat(),
+            today.isoformat(),
+        ),
+    ).fetchall()
+
     con.close()
 
     if location and location != "All Locations":
         if location in US_STATES:
-            rows = [r for r in rows if r["country"] == "United States" and r["location"] == location]
+            rows = [
+                row for row in rows
+                if row["country"] == "United States"
+                and row["location"] == location
+            ]
         else:
-            rows = [r for r in rows if r["country"] == location]
+            rows = [
+                row for row in rows
+                if row["country"] == location
+            ]
+
     return rows
+
+
+# ============================================================
+# MAIN PAGE
+# ============================================================
 
 @app.route("/", methods=["GET"])
 def index():
-    init_db()
-    seed_verified_regression_case()
     period = request.args.get("period", "1d")
     location = request.args.get("location", "All Locations")
+
     rows = get_incidents(period, location)
 
-    us = [r for r in rows if r["country"] == "United States"]
-    intl = [r for r in rows if r["country"] not in ("United States", "Unknown")]
-    unknown = [r for r in rows if r["country"] == "Unknown"]
+    us = [
+        row for row in rows
+        if row["country"] == "United States"
+    ]
+
+    international = [
+        row for row in rows
+        if row["country"] not in ("United States", "Unknown")
+    ]
+
+    unknown = [
+        row for row in rows
+        if row["country"] == "Unknown"
+    ]
+
+    killed = sum(row["status"] == "Killed" for row in rows)
+    injured = sum(
+        row["status"] == "Seriously Injured"
+        for row in rows
+    )
+    review = sum(
+        row["status"] == "Review Needed"
+        for row in rows
+    )
+
+    # Used by the template for the summary cards if desired.
+    killed_locations = sorted({
+        row["location"] for row in rows
+        if row["status"] == "Killed"
+        and row["location"] != "Unknown"
+    })
+
+    injured_locations = sorted({
+        row["location"] for row in rows
+        if row["status"] == "Seriously Injured"
+        and row["location"] != "Unknown"
+    })
+
+    all_locations = list(US_STATES.keys())
+
+    international_locations = sorted(
+        {
+            country for country in INTL_COUNTRIES
+            if country not in {
+                "UK", "England", "Scotland", "Wales",
+                "Northern Ireland", "Republic of Ireland",
+            }
+        }
+        | {"United Kingdom"}
+    )
 
     return render_template(
         "index.html",
         period=period,
         location=location,
-        all_states=US_STATES,
-        international_locations=INTERNATIONAL_LOCATIONS,
+        rows=rows,
         us=us,
-        intl=intl,
+        intl=international,
         unknown=unknown,
-        killed=sum(r["status"] == "Killed" for r in rows),
-        injured=sum(r["status"] == "Seriously Injured" for r in rows),
-        review=sum(r["status"] == "Review Needed" for r in rows),
+        killed=killed,
+        injured=injured,
+        review=review,
         total=len(rows),
+        killed_locations=killed_locations,
+        injured_locations=injured_locations,
+        all_states=all_locations,
+        international_locations=international_locations,
     )
 
-@app.route("/scan", methods=["POST"])
-def run_scan():
-    init_db()
-    seed_verified_regression_case()
-    period = request.form.get("period", "1d")
-    location = request.form.get("location", "All Locations")
-    candidates, relevant, added = scan()
-    flash(f"Scan complete: {candidates} news results checked, {relevant} relevant cyclist reports, {added} new incidents added.")
-    return redirect(url_for("index", period=period, location=location))
 
-@app.route("/health")
-def health():
-    init_db()
-    return {"status": "ok", "version": "10.1"}
+# ============================================================
+# SCAN BUTTON
+# ============================================================
+
+@app.route("/scan", methods=["POST"])
+def do_scan():
+    found, added = scan()
+
+    flash(
+        f"Scan finished: reviewed {found} candidate articles "
+        f"and added {added} new unique incidents."
+    )
+
+    return redirect(
+        url_for(
+            "index",
+            period=request.form.get("period", "1d"),
+            location=request.form.get(
+                "location",
+                "All Locations",
+            ),
+        )
+    )
+
+
+# ============================================================
+# START
+# ============================================================
+
+init_db()
 
 if __name__ == "__main__":
-    init_db()
-    seed_verified_regression_case()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False,
+        threaded=True,
+    )
